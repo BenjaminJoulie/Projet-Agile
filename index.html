@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Planning Poker</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #111;
+      background: #f7f7f7;
+    }
+    .page {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    .bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .btn {
+      height: 36px;
+      padding: 0 12px;
+      border: 1px solid #ccc;
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .btn:active { transform: translateY(1px); }
+    .board {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(90px, 1fr));
+      gap: 8px;
+    }
+    @media (max-width: 800px) {
+      .cards { grid-template-columns: repeat(4, minmax(90px, 1fr)); }
+    }
+    @media (max-width: 520px) {
+      .cards { grid-template-columns: repeat(3, minmax(90px, 1fr)); }
+    }
+    .card {
+      display: grid;
+      place-items: center;
+      height: 120px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background: #fafafa;
+      font-size: 24px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .card.selected {
+      outline: 2px solid #2563eb;
+      background: #eef2ff;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .meta {
+      display: flex;
+      gap: 12px;
+      font-size: 14px;
+      color: #333;
+    }
+    .tag { font-weight: 700; }
+    .hidden { display: none; }
+    .muted { color: #777; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="bar">
+      <h1>Planning Poker</h1>
+      <div>
+        <button class="btn" id="clearBtn">Réinitialiser</button>
+        <button class="btn" id="revealBtn">Révéler</button>
+      </div>
+    </div>
+
+    <div class="board">
+      <div class="cards" id="cards"></div>
+      <div class="row">
+        <div class="meta">
+          <span>Sélection: <span class="tag" id="picked">—</span></span>
+          <span>Médiane: <span class="tag" id="median">—</span></span>
+          <span>Moyenne: <span class="tag" id="average">—</span></span>
+        </div>
+        <div class="meta">
+          <span class="muted hidden" id="revealedTag">Révélé</span>
+          <span class="muted hidden" id="notNumberTag">Estimation spéciale</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { calculerMediane, calculerMoyenne } from './calc.js';
+    const VALUES = ["0","1","2","3","5","8","13","20","40","100","?","☕"];
+
+    const cardsEl = document.getElementById('cards');
+    const pickedEl = document.getElementById('picked');
+    const medianEl = document.getElementById('median');
+    const avgEl = document.getElementById('average');
+    const clearBtn = document.getElementById('clearBtn');
+    const revealBtn = document.getElementById('revealBtn');
+    const revealedTag = document.getElementById('revealedTag');
+    const notNumberTag = document.getElementById('notNumberTag');
+
+    let selected = null;
+    let revealed = false;
+
+    function renderCards() {
+      cardsEl.innerHTML = '';
+      VALUES.forEach(v => {
+        const btn = document.createElement('button');
+        btn.className = 'card' + (selected === v ? ' selected' : '');
+        btn.setAttribute('aria-pressed', selected === v ? 'true' : 'false');
+        btn.textContent = revealed ? v : '•';
+        btn.title = 'Carte ' + v;
+        btn.addEventListener('click', () => {
+          selected = v;
+          updateSummary();
+          renderCards();
+        });
+        cardsEl.appendChild(btn);
+      });
+    }
+
+    function updateSummary() {
+      pickedEl.textContent = selected ?? '—';
+      const nums = selected && /^\d+$/.test(selected) ? [Number(selected)] : [];
+      const med = calculerMediane(nums);
+      const avg = calculerMoyenne(nums);
+      medianEl.textContent = med ?? '—';
+      avgEl.textContent = avg ?? '—';
+      notNumberTag.classList.toggle('hidden', !selected || /^\d+$/.test(selected));
+      revealedTag.classList.toggle('hidden', !revealed);
+    }
+
+    function reveal() {
+      revealed = true;
+      renderCards();
+      updateSummary();
+    }
+
+    function resetAll() {
+      selected = null;
+      revealed = false;
+      renderCards();
+      updateSummary();
+    }
+
+    clearBtn.addEventListener('click', resetAll);
+    revealBtn.addEventListener('click', reveal);
+
+    renderCards();
+    updateSummary();
+  </script>
+</body>
+</html>
+
