@@ -10,11 +10,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup Node
+    - name: Set up node
       uses: actions/setup-node@v4
+
+    - name: Install dependencies
+      run: npm install
+    - name: Run tests
+      run: npm run test
 
     - name : Install JsDoc
       run : npm install -g jsdoc
