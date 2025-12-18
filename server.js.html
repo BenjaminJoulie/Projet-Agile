@@ -26,80 +26,363 @@
     
     <section>
         <article>
-            <pre class="prettyprint source linenums"><code>'use strict';
+            <pre class="prettyprint source linenums"><code>/**
+ * @file server.js
+ * @description Serveur NodeJS / Express / Socket.io pour l'application Planning Poker.
+ * @author Planning Poker Team
+ */
 
+// server.js
+const express = require('express');
 const http = require('http');
+const { Server } = require('socket.io');
 const path = require('path');
-const fs = require('fs');
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-const ROOT = __dirname;
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-/** Simple content-type map */
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.ico': 'image/x-icon'
-};
+// static
+app.use(express.static(path.join(__dirname, 'public')));
 
-function send(res, statusCode, content, headers = {}) {
-  res.writeHead(statusCode, { 'Cache-Control': 'no-store', ...headers });
-  res.end(content);
+// utilitaires
+/**
+ * Génère un code alphanumérique aléatoire pour identifier une partie.
+ * @param {number} [len=6] - Longueur du code souhaité (défaut 6).
+ * @returns {string} Le code généré.
+ */
+function genererCode(len = 6) {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i &lt; len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
 }
 
-function serveFile(res, filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  const type = MIME[ext] || 'application/octet-stream';
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      if (err.code === 'ENOENT') {
-        send(res, 404, 'Not Found', { 'Content-Type': 'text/plain; charset=utf-8' });
-      } else {
-        send(res, 500, 'Internal Server Error', { 'Content-Type': 'text/plain; charset=utf-8' });
-      }
-      return;
-    }
-    send(res, 200, data, { 'Content-Type': type });
+/**
+ * @typedef {Object} Joueur
+ * @property {string} nom - Nom du joueur.
+ * @property {string|null} vote - Valeur du vote (ou null si pas voté).
+ * @property {boolean} estMaitre - Indique si le joueur est le maître de la partie.
+ */
+
+/**
+ * @typedef {Object} Partie
+ * @property {string} code_partie - Code unique de la partie.
+ * @property {string} titre - Titre de la partie.
+ * @property {string[]} taches - Liste des tâches à estimer.
+ * @property {number} indexQuestion - Index de la tâche en cours.
+ * @property {boolean} demarre - État de la partie (démarrée ou non).
+ * @property {string} idMaitre - ID socket du maître.
+ * @property {Object.&lt;string, Joueur>} joueurs - Map des joueurs connectés (clé = socket ID).
+ * @property {Object[]} chat - Historique des messages.
+ * @property {boolean} enPause - Indique si la partie est en pause (ex: Café).
+ * @property {string|null} pauseDemandeePar - Nom du joueur ayant demandé la pause.
+ * @property {string} mode - Mode de validation (strict, mean, median, majority).
+ * @property {number} round - Numéro du tour de vote actuel.
+ */
+
+/**
+ * Stockage des parties en mémoire.
+ * @type {Object.&lt;string, Partie>}
+ */
+const parties = {}; // code -> { title, taches, indexQuestion, demarre, idMaitre, joueurs: {...}, chat: [] }
+
+io.on('connection', (socket) => {
+  console.log('connect', socket.id);
+
+  socket.on('create_game', ({ title, masterName, questions, current, mode }, cb) => {
+    const code = genererCode(6);
+    const partie = {
+      code_partie: code,
+      titre: title || 'Partie',
+      taches: Array.isArray(questions) ? questions.slice() : [],
+      indexQuestion: current || 0,
+      demarre: false,
+      idMaitre: socket.id,
+      joueurs: {},
+      chat: [],
+      pauseDemandeePar: null,
+      enPause: false,
+      mode: mode || 'strict', // strict, mean, median, majority
+      round: 1
+    };
+    parties[code] = partie;
+    socket.join(code);
+    partie.joueurs[socket.id] = { nom: masterName || 'Maitre', vote: null, estMaitre: true };
+    partie.code_partie = code;
+    console.log('Partie créée', code, 'mode:', partie.mode);
+    if (cb) cb({ ok: true, code });
+    io.to(code).emit('game_update', obtenirEtat(partie));
   });
+
+  socket.on('join_game', ({ code, name }, cb) => {
+    code = (code || '').toUpperCase();
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false, error: 'Partie introuvable' });
+    socket.join(code);
+    partie.joueurs[socket.id] = { nom: name || 'Joueur', vote: null, estMaitre: false };
+    if (cb) cb({ ok: true, code, title: partie.titre });
+    io.to(code).emit('game_update', obtenirEtat(partie));
+  });
+
+  socket.on('start_game', ({ code }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false, error: 'Partie introuvable' });
+    if (socket.id !== partie.idMaitre) return cb &amp;&amp; cb({ ok: false, error: 'Seul le maître peut démarrer' });
+    partie.demarre = true;
+    if (partie.indexQuestion === undefined || partie.indexQuestion === null) {
+      partie.indexQuestion = 0;
+    }
+    Object.values(partie.joueurs).forEach(j => j.vote = null);
+    io.to(code).emit('game_update', obtenirEtat(partie));
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('submit_vote', ({ code, value }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false });
+    if (!partie.joueurs[socket.id]) return cb &amp;&amp; cb({ ok: false });
+    partie.joueurs[socket.id].vote = value;
+
+    // Pause automatique si tout le monde vote Café
+    const listeJoueurs = Object.values(partie.joueurs);
+    const toutLeMondeAVote = listeJoueurs.every(j => j.vote !== null);
+    if (toutLeMondeAVote) {
+      const toutCafe = listeJoueurs.every(j => j.vote === 'café' || j.vote === 'cafe' || j.vote === 'Café');
+      if (toutCafe) {
+        partie.enPause = true;
+        partie.demarre = false;
+        partie.pauseDemandeePar = null; // Pause système
+        partie.chat.push({ nom: 'Système', msg: 'Pause Café déclenchée !', ts: Date.now() });
+      }
+    }
+
+    io.to(code).emit('game_update', obtenirEtat(partie));
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('unvote', ({ code }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false });
+    if (partie.joueurs[socket.id]) partie.joueurs[socket.id].vote = null;
+    io.to(code).emit('game_update', obtenirEtat(partie));
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('revote', ({ code }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false });
+    Object.values(partie.joueurs).forEach(j => j.vote = null);
+    partie.round = (partie.round || 1) + 1;
+    io.to(code).emit('game_update', obtenirEtat(partie));
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('next_question', ({ code }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false });
+    if (socket.id !== partie.idMaitre) return cb &amp;&amp; cb({ ok: false, error: 'Seul le maître peut avancer' });
+    if (partie.indexQuestion + 1 &lt; partie.taches.length) {
+      partie.indexQuestion += 1;
+    } else {
+      partie.demarre = false;
+      partie.indexQuestion = 0;
+    }
+    Object.values(partie.joueurs).forEach(j => j.vote = null);
+    partie.round = 1;
+    io.to(code).emit('game_update', obtenirEtat(partie));
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('send_chat', ({ code, msg }, cb) => {
+    const partie = parties[code];
+    if (!partie) return cb &amp;&amp; cb({ ok: false });
+    const nom = (partie.joueurs[socket.id] &amp;&amp; partie.joueurs[socket.id].nom) || 'Visiteur';
+    const m = { name: nom, msg, ts: Date.now() };
+    partie.chat.push(m);
+    if (partie.chat.length > 200) partie.chat.shift();
+    io.to(code).emit('chat_message', m);
+    if (cb) cb({ ok: true });
+  });
+
+  socket.on('request_pause', ({ code }) => {
+    const partie = parties[code];
+    if (!partie || partie.enPause) return;
+
+    const joueur = partie.joueurs[socket.id];
+    if (!joueur) return;
+
+    partie.pauseDemandeePar = joueur.nom;
+
+    io.to(code).emit('game_update', obtenirEtat(partie));
+  });
+
+  socket.on('accept_pause', ({ code }) => {
+    const partie = parties[code];
+    if (!partie) return;
+    if (socket.id !== partie.idMaitre) return;
+
+    partie.enPause = true;
+    partie.demarre = false;
+    partie.pauseDemandeePar = null;
+
+    io.to(code).emit('game_update', obtenirEtat(partie));
+  });
+  socket.on('reject_pause', ({ code }) => {
+    const partie = parties[code];
+    if (!partie) return;
+    if (socket.id !== partie.idMaitre) return;
+
+    partie.pauseDemandeePar = null;
+
+    // message d'info (optionnel mais recommandé)
+    partie.chat.push({
+      name: 'Système',
+      msg: 'Le maître a refusé la pause',
+      ts: Date.now()
+    });
+
+    io.to(code).emit('game_update', obtenirEtat(partie));
+  });
+
+  socket.on('resume_game', ({ code }) => {
+    const partie = parties[code];
+    if (!partie) return;
+    if (socket.id !== partie.idMaitre) return;
+
+    partie.enPause = false;
+    partie.demarre = true;
+    partie.pauseDemandeePar = null;
+
+    // On notifie tout le monde
+    partie.chat.push({
+      name: 'Système',
+      msg: 'La partie a repris !',
+      ts: Date.now()
+    });
+
+    io.to(code).emit('game_update', obtenirEtat(partie));
+  });
+
+  socket.on('disconnecting', () => {
+    // remove player from any games they were in
+    const rooms = Array.from(socket.rooms).filter(r => r !== socket.id);
+    rooms.forEach(r => {
+      const partie = parties[r];
+      if (!partie) return;
+      delete partie.joueurs[socket.id];
+      if (partie.idMaitre === socket.id) {
+        const ids = Object.keys(partie.joueurs);
+        if (ids.length > 0) {
+          partie.idMaitre = ids[0];
+          partie.joueurs[ids[0]].estMaitre = true;
+        } else {
+          delete parties[r];
+          return;
+        }
+      }
+      io.to(r).emit('game_update', obtenirEtat(partie));
+    });
+  });
+
+  socket.on('disconnect', () => {
+    console.log('disconnect', socket.id);
+  });
+});
+
+// prépare l'objet à envoyer au client
+/**
+ * Formate l'état d'une partie pour l'envoyer au client.
+ * Filtre les données sensibles si nécessaire (ici tout est public pour les joueurs).
+ * @param {Partie} partie - L'objet partie serveur.
+ * @returns {Object} L'objet partie formaté pour le client.
+ */
+function obtenirEtat(partie) {
+  return {
+    titre: partie.titre,
+    taches: partie.taches,
+    indexQuestion: partie.indexQuestion,
+    demarre: partie.demarre,
+    enPause: partie.enPause === true,
+    pauseDemandeePar: partie.pauseDemandeePar || null,
+    joueurs: Object.entries(partie.joueurs).map(([id, p]) => ({
+      id,
+      nom: p.nom,
+      vote: p.vote,
+      estMaitre: p.estMaitre
+    })),
+    chat: partie.chat,
+    mode: partie.mode,
+    tour: partie.round
+  };
 }
 
-const server = http.createServer((req, res) => {
-  try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    let pathname = url.pathname;
 
-    if (pathname === '/' || pathname === '/index') {
-      return serveFile(res, path.join(ROOT, 'index.html'));
-    }
+const PORT = process.env.PORT || 3000;
+// Si l'on est en mode test (requis par jest), on ne lance pas le serveur automatiquement
+if (require.main === module) {
+  server.listen(PORT, () => console.log('Server running on', PORT));
+}
 
-    // Prevent path traversal
-    const safePath = path.normalize(path.join(ROOT, pathname.replace(/^\/+/, '')));
-    if (!safePath.startsWith(ROOT)) {
-      return send(res, 403, 'Forbidden', { 'Content-Type': 'text/plain; charset=utf-8' });
-    }
+/**
+ * Soustrait b de a.
+ * @param {number} a - Première opérande.
+ * @param {number} b - Deuxième opérande.
+ * @returns {number} Résultat de a - b.
+ */
+function soustraire(a, b) {
+  return a - b;
+}
 
-    fs.stat(safePath, (err, stat) => {
-      if (err || !stat.isFile()) {
-        return send(res, 404, 'Not Found', { 'Content-Type': 'text/plain; charset=utf-8' });
-      }
-      serveFile(res, safePath);
-    });
-  } catch (e) {
-    send(res, 500, 'Internal Server Error', { 'Content-Type': 'text/plain; charset=utf-8' });
+/**
+ * Additionne a et b.
+ * @param {number} a - Première opérande.
+ * @param {number} b - Deuxième opérande.
+ * @returns {number} Résultat de a + b.
+ */
+function additionner(a, b) {
+  return a + b;
+}
+
+/**
+ * Calcule la moyenne arithmétique d'une liste de nombres.
+ * Les valeurs non numériques ou non finies sont ignorées.
+ * @param {Array&lt;number>} numbers - Tableau de nombres.
+ * @returns {number|null} La moyenne ou null si aucun nombre valide.
+ */
+function calculerMoyenne(numbers) {
+  if (!Array.isArray(numbers) || numbers.length === 0) return null;
+  const valid = numbers.filter(n => typeof n === 'number' &amp;&amp; Number.isFinite(n));
+  if (valid.length === 0) return null;
+  const sum = valid.reduce((a, b) => a + b, 0);
+  return sum / valid.length;
+}
+
+/**
+ * Calcule la médiane d'une liste de nombres.
+ * Les valeurs non numériques ou non finies sont ignorées.
+ * @param {Array&lt;number>} numbers - Tableau de nombres.
+ * @returns {number|null} La médiane ou null si aucun nombre valide.
+ */
+function calculerMediane(numbers) {
+  if (!Array.isArray(numbers) || numbers.length === 0) return null;
+  const valid = numbers.filter(n => typeof n === 'number' &amp;&amp; Number.isFinite(n)).slice().sort((a, b) => a - b);
+  if (valid.length === 0) return null;
+  const mid = Math.floor(valid.length / 2);
+  if (valid.length % 2 === 0) {
+    return (valid[mid - 1] + valid[mid]) / 2;
   }
-});
+  return valid[mid];
+}
 
-server.listen(PORT, () => {
-  console.log(`Planning Poker en écoute sur http://localhost:${PORT}`);
-});
-
-
+module.exports = {
+  genererCode,
+  obtenirEtat,
+  soustraire,
+  additionner,
+  calculerMoyenne,
+  calculerMediane
+};
 </code></pre>
         </article>
     </section>
@@ -110,13 +393,13 @@ server.listen(PORT, () => {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#MIME">MIME</a></li><li><a href="global.html#additionner">additionner</a></li><li><a href="global.html#calculerMediane">calculerMediane</a></li><li><a href="global.html#calculerMoyenne">calculerMoyenne</a></li><li><a href="global.html#soustraire">soustraire</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#additionner">additionner</a></li><li><a href="global.html#calculerMediane">calculerMediane</a></li><li><a href="global.html#calculerMoyenne">calculerMoyenne</a></li><li><a href="global.html#genererCode">genererCode</a></li><li><a href="global.html#obtenirEtat">obtenirEtat</a></li><li><a href="global.html#parties">parties</a></li><li><a href="global.html#soustraire">soustraire</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Mon Nov 10 2025 14:49:29 GMT+0000 (Coordinated Universal Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Thu Dec 18 2025 20:18:12 GMT+0000 (Coordinated Universal Time)
 </footer>
 
 <script> prettyPrint(); </script>
