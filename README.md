@@ -36,6 +36,7 @@ L'application permet de fluidifier les rituels d'estimation grâce aux fonctionn
 3.  **Démarrage** : Lancez le serveur avec `npm start`.
 4.  **Accès** : L'application est accessible à l'adresse `http://localhost:3000`.
 5.  **Url GitHub** : Accessible à l'adresse `https://benjaminjoulie.github.io/Projet-Agile`.
+6.  **Url Web** : Accessible à l'adresse `https://poker.benjoulie.xyz/`.
 
 ##  Architecture et Qualité
 
