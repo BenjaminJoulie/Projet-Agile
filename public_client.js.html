@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: public/client.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: public/client.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file client.js
+ * @description Logique côté client pour l'application Planning Poker.
+ * @author Planning Poker Team
+ */
+
+// client.js
+let socket;
+let app;
+
+// Éviter l'exécution immédiate si chargé via Node pour les tests
+if (typeof window !== 'undefined' &amp;&amp; typeof document !== 'undefined' &amp;&amp; !window.IS_TEST_ENV) {
+  socket = io();
+  app = document.getElementById('app');
+}
+/**
+ * Code unique de la partie en cours.
+ * @type {string|null}
+ */
+let codePartie = null;
+
+/**
+ * Liste des résultats validés (tâche + estimation finale).
+ * @type {Array.&lt;{task: string, priority: string}>}
+ */
+let resultatsValides = [];
+
+/**
+ * Dernier état reçu du serveur, utilisé pour rafraîchir la vue (ex: retour de récap).
+ * @type {Object|null}
+ */
+let dernierEtat = null;
+
+
+// Affiche l'écran d'accueil
+/**
+ * Affiche l'écran d'accueil avec les options Créer, Rejoindre, Reprendre.
+ * @returns {void}
+ */
+function afficherAccueil() {
+  app.innerHTML = `
+    &lt;div class="card">
+      &lt;h2>Planning Poker&lt;/h2>
+      &lt;div class="menu-grid">
+        &lt;button id="btnCreate" class="btn-large">Créer une partie&lt;/button>
+        &lt;button id="btnJoin" class="btn-large">Rejoindre&lt;/button>
+        &lt;button id="btnResume" class="btn-large">Reprendre&lt;/button>
+      &lt;/div>
+    &lt;/div>
+  `;
+  document.getElementById('btnCreate').onclick = afficherEcranCreation;
+  document.getElementById('btnJoin').onclick = afficherEcranRejoindre;
+  document.getElementById('btnResume').onclick = afficherEcranReprendre;
+
+}
+
+// Gère l'import du fichier JSON de tâches
+/**
+ * Gère l'import d'un fichier JSON contenant une liste de tâches.
+ * @param {Event} e - L'événement de changement de l'input file.
+ * @returns {void}
+ */
+function gererImportJson(e) {
+  const fichier = e.target.files[0];
+  if (!fichier) return;
+
+  const lecteur = new FileReader();
+
+  lecteur.onload = () => {
+    try {
+      const donnees = JSON.parse(lecteur.result);
+
+      if (!Array.isArray(donnees.questions)) {
+        alert('Le fichier JSON doit contenir un tableau "questions"');
+        return;
+      }
+
+      // Nettoyer les tâches existantes
+      document.getElementById('qs_wrap').innerHTML = '';
+
+      // Ajouter les nouvelles tâches
+      donnees.questions.forEach(q => ajouterTache(q));
+
+      // Remplir le titre si présent
+      if (donnees.title) {
+        document.getElementById('g_title').value = donnees.title;
+      }
+
+    } catch (err) {
+      alert('Fichier JSON invalide');
+    }
+  };
+
+  lecteur.readAsText(fichier);
+}
+
+
+/**
+ * Affiche le formulaire de création de partie.
+ * @returns {void}
+ */
+function afficherEcranCreation() {
+  app.innerHTML = `
+    &lt;div class="card">
+      &lt;h2>Créer une partie&lt;/h2>
+      &lt;label>Titre&lt;br>&lt;input id="g_title" placeholder="Titre (ex: Sprint)"/>&lt;/label>
+      &lt;label>Votre nom&lt;br>&lt;input id="g_master" placeholder="Alice"/>&lt;/label>
+      &lt;label>Règle de validation&lt;br>
+        &lt;select id="g_mode">
+          &lt;option value="strict">Unanimité (Strict)&lt;/option>
+          &lt;option value="mean">Moyenne&lt;/option>
+          &lt;option value="median">Médiane&lt;/option>
+          &lt;option value="majority">Majorité absolue&lt;/option>
+        &lt;/select>
+      &lt;/label>
+      &lt;label>Importer tâches (JSON)&lt;br>
+        &lt;input type="file" id="importJson" accept=".json"/>
+      &lt;/label>
+      &lt;div id="qs_wrap">&lt;/div>
+      &lt;div class="row" style="margin-top:20px">
+         &lt;button id="addQ" class="btn-secondary">Ajouter un point&lt;/button>
+      &lt;/div>
+      &lt;div class="actions-footer">
+        &lt;button id="back" class="btn-ghost">Retour&lt;/button>
+        &lt;button id="createBtn" class="btn-primary">Créer la partie&lt;/button> 
+      &lt;/div>
+    &lt;/div>
+  `;
+  document.getElementById('back').onclick = afficherAccueil;
+  document.getElementById('addQ').onclick = () => ajouterTache('');
+  document.getElementById('importJson').onchange = gererImportJson;
+  ajouterTache('Point 1');
+  ajouterTache('Point 2');
+
+  document.getElementById('createBtn').onclick = () => {
+    const titre = document.getElementById('g_title').value;
+    const maitre = document.getElementById('g_master').value || 'Maitre';
+    const mode = document.getElementById('g_mode').value;
+    // Récupérer la liste des tâches
+    const taches = Array.from(document.querySelectorAll('#qs_wrap textarea')).map(t => t.value).filter(x => x);
+
+    if (taches.length === 0) { alert('Ajoutez au moins une tâche'); return; }
+
+    socket.emit('create_game', { title: titre, masterName: maitre, questions: taches, mode }, (rep) => {
+      if (rep &amp;&amp; rep.ok) afficherEcranJeu(rep.code); else alert(rep &amp;&amp; rep.error ? rep.error : 'Erreur');
+    });
+  };
+}
+
+/**
+ * Ajoute une zone de texte pour une nouvelle tâche dans le formulaire de création.
+ * @param {string} [texte=''] - Texte initial de la tâche.
+ * @returns {void}
+ */
+function ajouterTache(texte = '') {
+  const conteneur = document.getElementById('qs_wrap');
+  const div = document.createElement('div'); div.className = 'card small';
+  div.innerHTML = `&lt;textarea rows="2" style="width:100%">${texte}&lt;/textarea>&lt;div style="text-align:right">&lt;button class="delQ">Supprimer&lt;/button>&lt;/div>`;
+  conteneur.appendChild(div);
+  div.querySelector('.delQ').onclick = () => div.remove();
+}
+
+/**
+ * Affiche le formulaire pour rejoindre une partie existante.
+ * @returns {void}
+ */
+function afficherEcranRejoindre() {
+  app.innerHTML = `
+    &lt;div class="card">
+      &lt;h2>Rejoindre&lt;/h2>
+      &lt;label>Nom&lt;br>&lt;input id="p_name" placeholder="Bob"/>&lt;/label>
+      &lt;label>Code de partie&lt;br>&lt;input id="p_code" placeholder="AB12CD"/>&lt;/label>
+      &lt;div class="actions-footer">
+        &lt;button id="back" class="btn-ghost">Retour&lt;/button>
+        &lt;button id="joinBtn" class="btn-primary">Rejoindre&lt;/button> 
+      &lt;/div>
+    &lt;/div>
+  `;
+  document.getElementById('back').onclick = afficherAccueil;
+  document.getElementById('joinBtn').onclick = () => {
+    const nom = document.getElementById('p_name').value || 'Joueur';
+    const code = document.getElementById('p_code').value.trim().toUpperCase();
+    if (!code) return alert('Code requis');
+    socket.emit('join_game', { code, name: nom }, (rep) => {
+      if (rep &amp;&amp; rep.ok) afficherEcranJeu(code); else alert(rep &amp;&amp; rep.error ? rep.error : 'Erreur');
+    });
+  };
+}
+
+/**
+ * Affiche l'écran permettant de reprendre une sauvegarde locale.
+ * @returns {void}
+ */
+function afficherEcranReprendre() {
+  app.innerHTML = `
+    &lt;div class="card">
+      &lt;h2>Reprendre une partie&lt;/h2>
+
+      &lt;label>Votre nom&lt;br>
+        &lt;input id="r_name" placeholder="Alice"/>
+      &lt;/label>
+
+      &lt;label>Fichier de sauvegarde&lt;br>
+        &lt;input type="file" id="resumeFile" accept=".json"/>
+      &lt;/label>
+
+      &lt;div class="actions-footer">
+        &lt;button id="back" class="btn-ghost">Retour&lt;/button>
+        &lt;button id="resumeBtn" class="btn-primary"> Reprendre&lt;/button>
+      &lt;/div>
+    &lt;/div>
+  `;
+
+  document.getElementById('back').onclick = afficherAccueil;
+  document.getElementById('resumeBtn').onclick = reprendreDepuisFichier;
+}
+
+/**
+ * Initialise le conteneur principal du jeu.
+ * @param {string} code - Le code de la partie.
+ * @returns {void}
+ */
+function afficherEcranJeu(code) {
+  codePartie = code;
+  app.innerHTML = `&lt;div id="gameRoot">&lt;/div>`;
+  document.getElementById('gameRoot').innerHTML = `&lt;div class="card">&lt;div id="game_title">Partie&lt;/div>&lt;div id="controls">&lt;/div>&lt;/div>&lt;div id="main">&lt;/div>`;
+  // La mise à jour viendra du serveur via 'game_update'
+}
+
+/**
+ * Fonction principale : met à jour l'interface HTML selon l'état du jeu reçu du serveur.
+ * Gère l'affichage des votes, des résultats, du chat, et des modes pause/fin.
+ * @param {Object} etat - L'objet état renvoyé par le serveur.
+ * @returns {void}
+ */
+function mettreAJourInterface(etat) {
+  console.log('ETAT RECU', etat);
+  dernierEtat = etat;
+  if (!codePartie) return;
+  const racine = document.getElementById('gameRoot'); if (!racine) return;
+
+  // Gestion des demandes de Pause
+  const jeSuisMaitre = etat.joueurs.some(j => j.estMaitre &amp;&amp; j.id === socket.id);
+  document.getElementById('game_title').innerHTML = `&lt;strong>${echapperHtml(etat.titre)} &lt;/strong> Code : ${codePartie} — Tâche ${etat.indexQuestion + 1}/${etat.taches.length}`;
+  console.log('Check Maitre:', jeSuisMaitre, socket.id); // DEBUG
+
+  if (etat.pauseDemandeePar &amp;&amp; !etat.enPause) {
+    const ctrl = document.getElementById('controls');
+
+    if (jeSuisMaitre) {
+      ctrl.innerHTML = `
+      &lt;div class="card center">
+        &lt;strong>${echapperHtml(etat.pauseDemandeePar)}&lt;/strong> demande une pause
+          &lt;div style="margin-top:20px; display:flex; gap:10px; justify-content:center;">
+             &lt;button id="acceptPause" class="btn-primary">Accepter&lt;/button>
+             &lt;button id="rejectPause" class="btn-secondary">Refuser&lt;/button>
+          &lt;/div>
+        &lt;/div>
+    `;
+
+      document.getElementById('acceptPause').onclick = () => {
+        socket.emit('accept_pause', { code: codePartie });
+      };
+      document.getElementById('rejectPause').onclick = () => {
+        socket.emit('reject_pause', { code: codePartie });
+      };
+    } else {
+      ctrl.innerHTML = `
+      &lt;div class="card center muted">
+        Pause demandée par ${echapperHtml(etat.pauseDemandeePar)}
+      &lt;/div>
+    `;
+    }
+
+    document.getElementById('main').innerHTML = '';
+    return; //  On bloque l'affichage du reste si une pause est demandée
+  }
+
+  // Zone de contrôles (Votes / Cartes)
+  const ctrl = document.getElementById('controls');
+  let htmlControles = '';
+
+  // Partie en pause effective
+  if (etat.enPause) {
+    if (jeSuisMaitre) {
+      document.getElementById('controls').innerHTML = '';
+      document.getElementById('main').innerHTML = `
+    &lt;div class="card center">
+      La partie a été mise en pause
+      &lt;div style="margin-top:10px">
+        &lt;div style="margin-top:20px; display:flex; gap:10px; justify-content:center;">
+          &lt;button id="goHome" class="btn-ghost">Menu&lt;/button>
+          &lt;button id="exportPause" class="btn-primary">Exporter&lt;/button>
+          &lt;button id="resumeGame" class="btn-secondary">Reprendre&lt;/button>
+        &lt;/div>
+      &lt;/div>
+    &lt;/div>
+  `;
+    }
+    else {
+      document.getElementById('controls').innerHTML = '';
+      document.getElementById('main').innerHTML = `
+    &lt;div class="card center">
+      La partie a été mise en pause
+      &lt;div style="margin-top:10px">
+        &lt;button id="goHome" class="btn-ghost">Retour au menu&lt;/button>
+      &lt;/div>
+    &lt;/div>
+  `;
+    }
+
+    document.getElementById('goHome').onclick = () => {
+      codePartie = null;
+      resultatsValides = [];
+      afficherAccueil();
+    };
+    const boutonExportPause = document.getElementById('exportPause')
+    if (boutonExportPause) {
+      boutonExportPause.onclick = () => {
+        exporterSauvegarde(etat);
+      };
+    }
+
+    const btnResume = document.getElementById('resumeGame');
+    if (btnResume) {
+      btnResume.onclick = () => {
+        socket.emit('resume_game', { code: codePartie });
+      };
+    }
+
+    return;
+  }
+
+  if (!etat.demarre) {
+    htmlControles += jeSuisMaitre ? `&lt;button id="startBtn" class="btn-primary btn-large" style="justify-content:center">Démarrer la partie&lt;/button>` : `&lt;div class="card center muted">En attente du maître...&lt;/div>`;
+  } else {
+    htmlControles += `&lt;div class="card">&lt;div id="questionBox">${echapperHtml(etat.taches[etat.indexQuestion] || '—')}&lt;/div>&lt;/div>`;
+
+    // Trouver mon vote actuel
+    const moi = etat.joueurs.find(j => j.id === socket.id) || { vote: null };
+
+    if (moi.vote === null) {
+      htmlControles += `&lt;div class="chips">${['0', '1/2', '1', '2', '3', '5', '8', '13', '20', '40', '100', 'Café'].map(v => `&lt;div class="chip" data-v="${v}">${v}&lt;/div>`).join('')}&lt;/div>`;
+    } else {
+      htmlControles += `&lt;div class="muted">Vous avez voté: &lt;strong>${moi.vote === null ? '—' : moi.vote}&lt;/strong> &lt;button id="unvote">Changer&lt;/button>&lt;/div>`;
+    }
+  }
+  ctrl.innerHTML = htmlControles;
+
+  // Listeners des boutons de contrôle
+  if (!etat.demarre) {
+    const b = document.getElementById('startBtn'); if (b) b.onclick = () => socket.emit('start_game', { code: codePartie });
+  } else {
+    Array.from(document.querySelectorAll('.chip')).forEach(el => el.onclick = () => {
+      const v = el.dataset.v;
+      socket.emit('submit_vote', { code: codePartie, value: v });
+    });
+    const un = document.getElementById('unvote'); if (un) un.onclick = () => socket.emit('unvote', { code: codePartie });
+  }
+
+  // Liste des joueurs et Résultats
+  const main = document.getElementById('main');
+  const htmlJoueurs = etat.joueurs.map(j => `&lt;div class="player">${echapperHtml(j.nom)}${j.estMaitre ? ' (maître)' : ''} — vote: ${j.vote === null ? '—' : 'ok'}&lt;/div>`).join('');
+
+  // Vérifier si tout le monde a voté
+  const toutLeMondeAVote = etat.joueurs.length > 0 &amp;&amp; etat.joueurs.every(j => j.vote !== null);
+
+  let htmlResultats = `&lt;div class="card">&lt;h3>Joueurs&lt;/h3>${htmlJoueurs}&lt;/div>`;
+
+  if (toutLeMondeAVote) {
+    htmlResultats += `&lt;div class="card">&lt;h3>Résultats&lt;/h3>&lt;ul>${etat.joueurs.map(j => `&lt;li>${echapperHtml(j.nom)}: ${j.vote}&lt;/li>`).join('')}&lt;/ul>&lt;/div>`;
+
+    const tour = etat.tour || 1;
+    const mode = etat.mode || 'strict';
+
+    const resultat = calculerResultatVote(etat.joueurs, mode, tour);
+
+    // Mise à jour des variables locales pour l'affichage
+    let accordTrouve = resultat.accordTrouve;
+    let valeurFinale = resultat.valeurFinale;
+
+    if (accordTrouve) {
+      if (resultat.toutCafe) {
+        htmlResultats += `
+        &lt;div class="card center">
+          Tout le monde veut un café ! Pause...
+          ${jeSuisMaitre ? `&lt;div style="margin-top:10px">&lt;button id="exportPause" class="btn-primary">Exporter&lt;/button>&lt;/div>` : ''}
+        &lt;/div>`;
+      } else if (valeurFinale !== null) {
+        const modeLabels = {
+          strict: 'Unanimité',
+          mean: 'Moyenne',
+          median: 'Médiane',
+          majority: 'Majorité'
+        };
+        const libelleMode = modeLabels[mode] || mode;
+
+        htmlResultats += `
+           &lt;div class="card center">
+              &lt;div style="font-size:1.2rem; margin-bottom:0.5rem">
+                 Accord trouvé : &lt;strong>${valeurFinale}&lt;/strong>
+              &lt;/div>
+              &lt;div class="muted" style="font-size:0.9rem">
+                 ${libelleMode} — ${tour}${tour === 1 ? 'er' : 'ème'} tour
+              &lt;/div>`;
+      }
+
+      const tacheActuelle = etat.taches[etat.indexQuestion];
+      const dejaSauvegarde = resultatsValides.some(r => r.task === tacheActuelle);
+
+      if (!dejaSauvegarde &amp;&amp; valeurFinale !== null) {
+        resultatsValides.push({
+          task: tacheActuelle,
+          priority: valeurFinale
+        });
+      }
+
+      if (jeSuisMaitre &amp;&amp; etat.indexQuestion === etat.taches.length - 1) {
+        // Fin de partie
+        htmlResultats += `
+          &lt;div class="card center">
+            &lt;div class="muted">Fin de partie&lt;/div>
+            &lt;div style="display:flex; gap:10px; justify-content:center; margin-top:10px">
+              &lt;button id="exportJson">Exporter les priorités (JSON)&lt;/button>
+              &lt;button id="showRecap" class="btn-secondary">Voir Récapitulatif&lt;/button>
+            &lt;/div>
+          &lt;/div>
+        `;
+      }
+      else if (jeSuisMaitre) htmlResultats += `&lt;div style="margin-top:8px">&lt;button id="next">Suivant&lt;/button>&lt;/div>`;
+      htmlResultats += `&lt;/div>`;
+
+    } else {
+      // Pas d'accord
+      htmlResultats += `&lt;div class="card">&lt;div class="muted">Votes différents — discutez ou revoter&lt;/div>${jeSuisMaitre ? `&lt;div style="margin-top:8px">&lt;button id="revote">Revoter&lt;/button>&lt;/div>` : ''}&lt;/div>`;
+    }
+  }
+
+
+  // Chat
+  const chatDesactive = !toutLeMondeAVote ? 'disabled' : '';
+  htmlResultats += `&lt;div class="card">&lt;h3>Chat&lt;/h3>&lt;div id="chatBox" class="chat">${etat.chat.map(m => `&lt;div>&lt;strong>${echapperHtml(m.name)}&lt;/strong>: ${echapperHtml(m.msg)}&lt;/div>`).join('')}&lt;/div>&lt;div style="margin-top:8px">&lt;input id="chatInput" placeholder="Message..." style="width:78%"/> &lt;button id="sendChat" ${chatDesactive}>Envoyer&lt;/button> &lt;/div>&lt;/div>`;
+
+  main.innerHTML = htmlResultats;
+
+  // Listeners finaux
+  const exp = document.getElementById('exportJson');
+  if (exp) {
+    exp.onclick = () => exporterResultats(etat.titre);
+  }
+
+  const btnRecap = document.getElementById('showRecap');
+  if (btnRecap) {
+    btnRecap.onclick = afficherRecapitulatif;
+  }
+
+  const expPause = document.getElementById('exportPause');
+  if (expPause) {
+    expPause.onclick = () => exporterSauvegarde(etat);
+  }
+
+  const rb = document.getElementById('revote'); if (rb) rb.onclick = () => socket.emit('revote', { code: codePartie });
+  const nx = document.getElementById('next'); if (nx) nx.onclick = () => socket.emit('next_question', { code: codePartie });
+  const sc = document.getElementById('sendChat'); if (sc) sc.onclick = () => {
+    const v = document.getElementById('chatInput').value.trim(); if (!v) return; socket.emit('send_chat', { code: codePartie, msg: v }); document.getElementById('chatInput').value = '';
+  };
+
+  // Scroll chat vers le bas
+  const cb = document.getElementById('chatBox'); if (cb) cb.scrollTop = cb.scrollHeight;
+}
+
+/**
+ * Échappe les caractères spéciaux HTML pour éviter les injections XSS.
+ * @param {string} s - La chaîne à échapper.
+ * @returns {string} La chaîne sécurisée.
+ */
+function echapperHtml(s) { if (!s &amp;&amp; s !== 0) return ''; return String(s).replace(/[&amp;&lt;>"']/g, c => ({ '&amp;': '&amp;amp;', '&lt;': '&amp;lt;', '>': '&amp;gt;', '"': '&amp;quot;', "'": '&amp;#39;' }[c])); }
+
+/**
+ * Lit le fichier JSON sélectionné et tente de recréer la partie via le serveur.
+ * @returns {void}
+ */
+function reprendreDepuisFichier() {
+  const fichier = document.getElementById('resumeFile').files[0];
+  const nom = document.getElementById('r_name').value || 'Maitre';
+
+  if (!fichier) return alert('Fichier requis');
+
+  const lecteur = new FileReader();
+
+  lecteur.onload = () => {
+    try {
+      const donnees = JSON.parse(lecteur.result);
+
+      if (!donnees.questions || donnees.current === undefined) {
+        alert('Fichier invalide');
+        return;
+      }
+
+      resultatsValides = donnees.results || [];
+
+      socket.emit('create_game', {
+        title: donnees.title,
+        masterName: nom,
+        questions: donnees.questions,
+        current: donnees.current,
+        resumed: true
+      }, (rep) => {
+        if (rep.ok) afficherEcranJeu(rep.code);
+        else alert(rep.error);
+      });
+
+    } catch {
+      alert('JSON invalide');
+    }
+  };
+
+  lecteur.readAsText(fichier);
+}
+
+/**
+ * Génère et télécharge un fichier JSON contenant les résultats validés.
+ * @param {string} titre - Le titre de la partie.
+ * @returns {void}
+ */
+function exporterResultats(titre) {
+  if (!resultatsValides.length) {
+    alert('Aucun résultat à exporter');
+    return;
+  }
+
+  const donnees = {
+    title: titre,
+    results: resultatsValides
+  };
+
+  const blob = new Blob(
+    [JSON.stringify(donnees, null, 2)],
+    { type: 'application/json' }
+  );
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+
+  a.href = url;
+  a.download = `${titre || 'planning-poker'}-resultats.json`;
+  a.click();
+
+  URL.revokeObjectURL(url);
+}
+
+// --- FONCTIONS LOGIQUES ---
+
+/**
+ * Calcule le résultat du vote en fonction des joueurs, du mode et du tour.
+ * @param {Array} joueurs - Liste des joueurs.
+ * @param {string} mode - Mode de vote (strict, mean, median, majority).
+ * @param {number} tour - Numéro du tour actuel.
+ * @returns {Object} { accordTrouve, valeurFinale, toutCafe }
+ */
+function calculerResultatVote(joueurs, mode, tour) {
+  // Filtrer les votes "Café" pour les calculs
+  const votes = joueurs.map(j => j.vote).filter(v => v !== 'Café' &amp;&amp; v !== 'cafe' &amp;&amp; v !== 'café');
+  const toutCafe = joueurs.every(j => j.vote === 'Café' || j.vote === 'cafe' || j.vote === 'café');
+
+  let accordTrouve = false;
+  let valeurFinale = null;
+
+  if (toutCafe) {
+    accordTrouve = true; // Consensus sur la pause
+    return { accordTrouve, valeurFinale, toutCafe };
+  }
+
+  // Convertir (gestion du 1/2)
+  const valeursNumeriques = votes.map(v => v === '1/2' ? 0.5 : parseFloat(v)).filter(n => !isNaN(n));
+
+  // Le Tour 1 est TOUJOURS en mode Strict (Unanimité), sauf si tout café
+  const leTour = tour || 1;
+  const leMode = mode || 'strict';
+
+  if (leTour === 1) {
+    // Mode Strict (Tour 1)
+    if (joueurs.length > 0) {
+      const premierVote = joueurs[0].vote;
+      accordTrouve = joueurs.every(j => j.vote === premierVote);
+      if (accordTrouve) valeurFinale = premierVote;
+    }
+  } else {
+    // Tours suivants
+    if (leMode === 'strict') {
+      const premierVote = joueurs[0].vote;
+      accordTrouve = joueurs.every(j => j.vote === premierVote);
+      if (accordTrouve) valeurFinale = premierVote;
+    } else if (leMode === 'mean') {
+      const avg = calculerMoyenne(valeursNumeriques);
+      if (avg !== null) {
+        valeurFinale = avg.toFixed(1);
+        accordTrouve = true;
+      }
+    } else if (leMode === 'median') {
+      const med = calculerMediane(valeursNumeriques);
+      if (med !== null) {
+        valeurFinale = med.toFixed(1);
+        accordTrouve = true;
+      }
+    } else if (leMode === 'majority') {
+      // Majorité absolue (> 50%)
+      const compte = {};
+      valeursNumeriques.forEach(x => compte[x] = (compte[x] || 0) + 1);
+      const gagnant = Object.keys(compte).find(k => compte[k] > valeursNumeriques.length / 2);
+      if (gagnant) {
+        valeurFinale = gagnant; // String key
+        accordTrouve = true;
+      }
+    }
+  }
+
+  return { accordTrouve, valeurFinale, toutCafe };
+}
+
+/**
+ * Soustrait b de a.
+ * @param {number} a - Première opérande.
+ * @param {number} b - Deuxième opérande.
+ * @returns {number} Résultat de a - b.
+ */
+function soustraire(a, b) {
+  return a - b;
+}
+
+/**
+ * Additionne a et b.
+ * @param {number} a - Première opérande.
+ * @param {number} b - Deuxième opérande.
+ * @returns {number} Résultat de a + b.
+ */
+function additionner(a, b) {
+  return a + b;
+}
+
+/**
+ * Calcule la moyenne arithmétique d'une liste de nombres.
+ * Les valeurs non numériques ou non finies sont ignorées.
+ * @param {Array&lt;number>} numbers - Tableau de nombres.
+ * @returns {number|null} La moyenne ou null si aucun nombre valide.
+ */
+function calculerMoyenne(numbers) {
+  if (!Array.isArray(numbers) || numbers.length === 0) return null;
+  const valid = numbers.filter(n => typeof n === 'number' &amp;&amp; Number.isFinite(n));
+  if (valid.length === 0) return null;
+  const sum = valid.reduce((a, b) => a + b, 0);
+  return sum / valid.length;
+}
+
+/**
+ * Calcule la médiane d'une liste de nombres.
+ * Les valeurs non numériques ou non finies sont ignorées.
+ * @param {Array&lt;number>} numbers - Tableau de nombres.
+ * @returns {number|null} La médiane ou null si aucun nombre valide.
+ */
+function calculerMediane(numbers) {
+  if (!Array.isArray(numbers) || numbers.length === 0) return null;
+  const valid = numbers.filter(n => typeof n === 'number' &amp;&amp; Number.isFinite(n)).slice().sort((a, b) => a - b);
+  if (valid.length === 0) return null;
+  const mid = Math.floor(valid.length / 2);
+  if (valid.length % 2 === 0) {
+    return (valid[mid - 1] + valid[mid]) / 2;
+  }
+  return valid[mid];
+}
+
+/**
+ * Génère et télécharge une sauvegarde complète de l'état actuel (pour pause).
+ * @param {Object} etat - L'état actuel de la partie.
+ * @returns {void}
+ */
+function exporterSauvegarde(etat) {
+  const donnees = {
+    title: etat.titre,
+    current: etat.indexQuestion,
+    questions: etat.taches,
+    results: resultatsValides
+  };
+
+  const blob = new Blob(
+    [JSON.stringify(donnees, null, 2)],
+    { type: 'application/json' }
+  );
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${etat.titre || 'planning-poker'}-pause.json`;
+  a.click();
+
+  URL.revokeObjectURL(a.href);
+}
+
+/**
+ * Affiche une vue modale / tableau récapitulatif de tous les votes validés.
+ * @returns {void}
+ */
+function afficherRecapitulatif() {
+  const main = document.getElementById('main');
+
+  let html = `
+    &lt;div class="card">
+      &lt;h3>Récapitulatif de la partie&lt;/h3>
+      &lt;table style="width:100%; border-collapse: collapse; margin-top: 15px;">
+        &lt;thead>
+          &lt;tr style="border-bottom: 2px solid var(--border)">
+            &lt;th style="text-align:left; padding: 8px">Tâche&lt;/th>
+            &lt;th style="text-align:right; padding: 8px">Estimation&lt;/th>
+          &lt;/tr>
+        &lt;/thead>
+        &lt;tbody>
+  `;
+
+  if (resultatsValides.length === 0) {
+    html += `&lt;tr>&lt;td colspan="2" style="text-align:center; padding:20px" class="muted">Aucun résultat validé pour le moment&lt;/td>&lt;/tr>`;
+  } else {
+    resultatsValides.forEach(r => {
+      html += `
+        &lt;tr style="border-bottom: 1px solid var(--border)">
+          &lt;td style="padding: 8px">${echapperHtml(r.task)}&lt;/td>
+          &lt;td style="text-align:right; padding: 8px">&lt;strong>${r.priority}&lt;/strong>&lt;/td>
+        &lt;/tr>
+      `;
+    });
+  }
+
+  html += `
+        &lt;/tbody>
+      &lt;/table>
+      &lt;div style="margin-top: 20px; text-align: center">
+        &lt;button id="closeRecap" class="btn-ghost">Retour&lt;/button>
+      &lt;/div>
+    &lt;/div>
+  `;
+
+  main.innerHTML = html;
+
+  document.getElementById('closeRecap').onclick = () => {
+    if (dernierEtat) mettreAJourInterface(dernierEtat);
+  };
+}
+
+// Listeners Socket.io
+socket.on('connect', () => { console.log('Connecté au serveur', socket.id); });
+socket.on('game_update', (etat) => {
+  console.log('Mise à jour reçue');
+  mettreAJourInterface(etat);
+});
+socket.on('chat_message', (m) => {
+  const cb = document.getElementById('chatBox'); if (cb) { cb.innerHTML += `&lt;div>&lt;strong>${echapperHtml(m.name)}&lt;/strong>: ${echapperHtml(m.msg)}&lt;/div>`; cb.scrollTop = cb.scrollHeight; }
+});
+
+afficherAccueil();
+
+
+
+
+
+try {
+  module.exports = {
+    echapperHtml,
+    mettreAJourInterface,
+    afficherEcranReprendre,
+    afficherEcranRejoindre,
+    afficherEcranCreation,
+    afficherAccueil,
+    afficherAccueil,
+    exporterSauvegarde,
+    soustraire,
+    additionner,
+    calculerMoyenne,
+    calculerMediane,
+    calculerResultatVote
+  };
+} catch (e) {
+  console.error('EXPORT ERROR:', e);
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#additionner">additionner</a></li><li><a href="global.html#afficherAccueil">afficherAccueil</a></li><li><a href="global.html#afficherEcranCreation">afficherEcranCreation</a></li><li><a href="global.html#afficherEcranJeu">afficherEcranJeu</a></li><li><a href="global.html#afficherEcranRejoindre">afficherEcranRejoindre</a></li><li><a href="global.html#afficherEcranReprendre">afficherEcranReprendre</a></li><li><a href="global.html#afficherRecapitulatif">afficherRecapitulatif</a></li><li><a href="global.html#ajouterTache">ajouterTache</a></li><li><a href="global.html#calculerMediane">calculerMediane</a></li><li><a href="global.html#calculerMoyenne">calculerMoyenne</a></li><li><a href="global.html#calculerResultatVote">calculerResultatVote</a></li><li><a href="global.html#codePartie">codePartie</a></li><li><a href="global.html#dernierEtat">dernierEtat</a></li><li><a href="global.html#echapperHtml">echapperHtml</a></li><li><a href="global.html#exporterResultats">exporterResultats</a></li><li><a href="global.html#exporterSauvegarde">exporterSauvegarde</a></li><li><a href="global.html#genererCode">genererCode</a></li><li><a href="global.html#gererImportJson">gererImportJson</a></li><li><a href="global.html#mettreAJourInterface">mettreAJourInterface</a></li><li><a href="global.html#obtenirEtat">obtenirEtat</a></li><li><a href="global.html#parties">parties</a></li><li><a href="global.html#reprendreDepuisFichier">reprendreDepuisFichier</a></li><li><a href="global.html#resultatsValides">resultatsValides</a></li><li><a href="global.html#soustraire">soustraire</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Thu Dec 18 2025 20:36:10 GMT+0000 (Coordinated Universal Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
