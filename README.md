@@ -43,7 +43,7 @@ L'application permet de fluidifier les rituels d'estimation grâce aux fonctionn
 Nous avons mis un point d'honneur à rendre le code maintenable et fiable.
 
 *   **Intégration Continue** : Chaque modification du code déclenche automatiquement une suite de tests via GitHub Actions, garantissant la stabilité du projet.
-*   **Tests Unitaires** : La logique métier critique (notamment les algorithmes de calcul de vote) est couverte par des tests rigoureux (`npm test`).
+*   **Tests Unitaires** : La logique est couverte par des tests rigoureux (`npm test`).
 *   **Documentation** : Le code source est documenté pour faciliter la reprise et la lecture.
 
 ---
