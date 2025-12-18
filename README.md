@@ -36,13 +36,14 @@ L'application permet de fluidifier les rituels d'estimation grâce aux fonctionn
 3.  **Démarrage** : Lancez le serveur avec `npm start`.
 4.  **Accès** : L'application est accessible à l'adresse `http://localhost:3000`.
 5.  **Url GitHub** : Accessible à l'adresse `https://benjaminjoulie.github.io/Projet-Agile`.
+6.  **Url Web** : Accessible à l'adresse `https://poker.benjoulie.xyz/`.
 
 ##  Architecture et Qualité
 
 Nous avons mis un point d'honneur à rendre le code maintenable et fiable.
 
 *   **Intégration Continue** : Chaque modification du code déclenche automatiquement une suite de tests via GitHub Actions, garantissant la stabilité du projet.
-*   **Tests Unitaires** : La logique métier critique (notamment les algorithmes de calcul de vote) est couverte par des tests rigoureux (`npm test`).
+*   **Tests Unitaires** : La logique est couverte par des tests rigoureux (`npm test`).
 *   **Documentation** : Le code source est documenté pour faciliter la reprise et la lecture.
 
 ---
