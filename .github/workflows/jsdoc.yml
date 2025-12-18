@@ -19,14 +19,14 @@ jobs:
     - name: Install dependencies
       run: npm install
       
-    - name: Run tests
+    - name: Exécution des tests
       run: npm run test
 
     - name : Install JsDoc
       run : npm install -g jsdoc
 
     - name: Generate Documentation
-      run: jsdoc *.js
+      run: jsdoc server.js public/client.js calc.js
 
     - name: Deploy Documentation
     
